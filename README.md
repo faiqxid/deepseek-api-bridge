@@ -4,7 +4,7 @@
 [![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker)](https://www.docker.com)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI--Compatible-412991?style=flat&logo=openai)](https://platform.openai.com)
 
-Proxy API berkinerja tinggi dan tangguh yang mengubah akun web/mobile DeepSeek menjadi endpoint **OpenAI-compatible** dengan dukungan streaming token-by-token yang sesungguhnya (real SSE). Dirancang khusus untuk memfasilitasi alur kerja **Vibe Coding** pada ekstensi VS Code seperti **Cline**, **Roo Code**, dan **Continue**, serta sepenuhnya kompatibel sebagai *custom provider* di **9router**.
+Proxy API berkinerja tinggi dan tangguh yang mengubah akun web/mobile DeepSeek menjadi endpoint **OpenAI-compatible** dengan dukungan streaming token-by-token yang sesungguhnya (real SSE). Dirancang khusus untuk memfasilitasi alur kerja **Vibe Coding** pada ekstensi VS Code seperti **Cline**, **Roo Code**, dan **Continue**, mendukung **Hermes Agent** via *Tool Calling*, serta sepenuhnya kompatibel sebagai *custom provider* di **9router**.
 
 ---
 
@@ -22,6 +22,7 @@ Proxy API berkinerja tinggi dan tangguh yang mengubah akun web/mobile DeepSeek m
 7. [Dokumentasi API Endpoint](#-dokumentasi-api-endpoint)
 8. [Panduan Integrasi Klien](#-panduan-integrasi-klien)
    - [Integrasi dengan Cline (VS Code)](#integrasi-dengan-cline-vs-code)
+   - [Integrasi dengan Hermes Agent](#integrasi-dengan-hermes-agent)
    - [Integrasi dengan 9router](#integrasi-dengan-9router)
 9. [Penanganan Masalah (Troubleshooting)](#-penanganan-masalah-troubleshooting)
 10. [Praktik Keamanan (Security)](#-praktik-keamanan-security)
@@ -32,7 +33,8 @@ Proxy API berkinerja tinggi dan tangguh yang mengubah akun web/mobile DeepSeek m
 
 - ⚡ **Real Streaming (SSE)**: Mengalirkan token satu per satu secara langsung (*realtime*). Mencegah Cline/klien mengalami *freeze* atau *timeout* akibat menunggu seluruh jawaban selesai di-buffer.
 - 🧠 **Dukungan Blok Berpikir (Reasoning Content)**: Meneruskan blok berpikir asli dari model `deepseek-reasoner` ke field `delta.reasoning_content` (sesuai konvensi DeepSeek-R1), sehingga Cline dapat menampilkan kotak *thinking* secara elegan.
-- 🛠️ **Kompatibilitas Penuh Tool-Call XML**: Menjaga integritas *system prompt* Cline tanpa modifikasi atau pembungkusan label tambahan, memastikan asisten AI menghasilkan format XML tool call yang valid.
+- 🛠️ **Kompatibilitas Penuh Tool-Call**: Menjaga integritas *system prompt* Cline tanpa modifikasi, **termasuk parsing native tool calls untuk integrasi Hermes Agent** (merubah respon XML/DSML menjadi format native tool calls OpenAI).
+- 🤖 **Kompatibilitas Hermes Agent**: Mendukung penuh alur kerja autonomous multi-agent dengan tool execution, lengkap dengan translasinya.
 - 🔄 **Dua Mode Autentikasi & Operasi**:
   - **Mode Tanpa File (Vercel/Stateless)**: Membaca kredensial `email:password` dinamis langsung dari header `Authorization: Bearer` yang dikirim 9router atau Cline.
   - **Mode Lokal (Round-Robin)**: Memutar akun secara otomatis menggunakan daftar akun yang disimpan di `accounts.txt`.
@@ -92,6 +94,7 @@ deepseek-bot/
 │   │       └── pow.js        # Solver tantangan Proof-of-Work (PoW)
 │   └── util/
 │       ├── logger.js         # Format logging konsol terpadu
+│       ├── toolCallParser.js # Parser native tool calls XML/DSML ⇄ OpenAI
 │       ├── promptBuilder.js  # Kompilasi messages[] menjadi prompt tunggal
 │       ├── requestMiddleware.js # Penyelaras request & logger traffic
 │       └── sse.js            # Helper standar SSE (Server-Sent Events)
@@ -338,6 +341,23 @@ Cline dapat diarahkan langsung ke proxy ini (baik lokal maupun deployment Vercel
 5. Masukkan **Model ID**: `deepseek-chat` atau `deepseek-reasoner`.
 
 Sekarang Cline akan berfungsi dengan lancar, menampilkan animasi berpikir (*thinking box*) saat Anda memilih `deepseek-reasoner`, dan dapat membaca serta menulis file lokal Anda secara *realtime* tanpa kendala timeout!
+
+---
+
+### Integrasi dengan Hermes Agent
+
+Hermes Agent adalah agen mandiri yang menggunakan Tool Calling secara native. Proxy ini sekarang secara penuh menerjemahkan format internal DeepSeek (XML/DSML) menjadi format OpenAI Tool Calls, menjadikannya kompatibel dengan alur kerja Hermes:
+
+1. Pastikan server proxy menyala (contoh: di `http://127.0.0.1:3000`).
+2. Buka `~/.hermes/config.yaml` dan tambahkan ke `custom_providers`:
+```yaml
+custom_providers:
+  - name: deepseek-bridge
+    api_key: "email_kamu@gmail.com:password_kamu"
+    base_url: "http://127.0.0.1:3000/v1"
+```
+3. Ganti model default di `config.yaml` ke `provider: custom:deepseek-bridge` dan `model: deepseek-chat`.
+4. Jalankan `hermes`. Agent akan bisa menggunakan tools filesystem, web search, code execution, dan subagents dengan sempurna menggunakan akun web DeepSeek!
 
 ---
 

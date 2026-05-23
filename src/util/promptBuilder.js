@@ -12,6 +12,8 @@
 //    chat (User: / Assistant:) supaya batas pesan tetap jelas.
 // 3. Tool result diberi tanda eksplisit agar tidak tertukar dengan jawaban
 //    asisten.
+// 4. Force Tool Calling Suffix: Menambahkan instruksi ketat di akhir pesan user
+//    terakhir untuk mencegah model mengabaikan tool dan hanya menulis markdown biasa (terutama di akun baru).
 
 import { extractToolCallsFromAssistantMessage, buildToolDefinitionsPrompt } from './toolCallParser.js';
 
@@ -47,19 +49,39 @@ export function buildCombinedPrompt(messages = [], tools = null) {
     const systemParts = [];
     const turns = [];
 
+    const hasTools = tools && tools.length > 0;
+
     // Jika ada tools, tambahkan instruksi tentang tools di system message
-    if (tools && tools.length > 0) {
+    if (hasTools) {
         systemParts.push(buildToolDefinitionsPrompt(tools));
     }
 
-    for (const msg of messages) {
-        const text = flattenContent(msg?.content);
+    // Cari index pesan user terakhir untuk disisipkan penegasan tool call
+    let lastUserIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+            lastUserIndex = i;
+            break;
+        }
+    }
+
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        let text = flattenContent(msg?.content);
         
         if (msg.role === 'system' || msg.role === 'developer') {
             // System message PERSIS apa adanya — tanpa label, tanpa pembungkus.
             if (text) systemParts.push(text.trim());
         } else if (msg.role === 'user') {
-            if (text) turns.push(`User: ${text}`);
+            if (text) {
+                // Jika ini adalah pesan user terakhir dan kita punya tools,
+                // tambahkan suffix penegasan SUPER AGRESIF agar model WAJIB memakai tool call.
+                // Ini sangat penting untuk akun baru (fresh session) yang tidak punya few-shot history.
+                if (hasTools && i === lastUserIndex) {
+                    text += "\n\n[SYSTEM NOTE: You MUST use the `<tool_calls>` XML format to execute functions if you need to read, write, modify files, or run terminal commands. DO NOT output the file content or code block directly in markdown. DO NOT write bash/shell commands in markdown. You MUST call the appropriate tool (e.g. write_file, patch, or terminal) to apply changes to the disk! This is your FINAL and ONLY chance to execute actions. If you fail to use tools, the user will not be able to complete their task. Check available tools above.]";
+                }
+                turns.push(`User: ${text}`);
+            }
         } else if (msg.role === 'assistant') {
             // Tool calls dari assistant message OpenAI-format harus ditampilkan
             // agar konteks lengkap saat resume percakapan.

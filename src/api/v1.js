@@ -15,6 +15,106 @@ import { setSseHeaders, buildChatChunk, writeSseChunk, writeSseDone } from '../u
 import { createLogger } from '../util/logger.js';
 import { parseToolCallsFromText, stripToolCalls, hasToolCalls } from '../util/toolCallParser.js';
 
+/**
+ * Deteksi dan konversi blok kode markdown mencurigakan (bash/shell/html) 
+ * yang seharusnya adalah tool call menjadi format tool_calls OpenAI.
+ * 
+ * DeepSeek sometimes "bocor" dan menuliskan perintah shell/file langsung di markdown
+ * alih-alih menggunakan format <tool_calls> XML yang benar.
+ * Fungsi ini menangkap pola seperti:
+ * - ```bash\ncat > file.txt << 'EOF'\n...```
+ * - ```html\n<!DOCTYPE html>\n<html>...```
+ * - ```sh\nmkdir -p ...```
+ * dan mengkonversinya menjadi tool_calls yang valid.
+ */
+function detectAndConvertMarkdownToolLeaks(text) {
+    if (!text || typeof text !== 'string') return null;
+    
+    const toolCalls = [];
+    
+    // Pattern untuk mendeteksi blok bash/shell yang menulis ke file
+    // Contoh: ```bash\ncat > index.html << 'EOF'\n...```
+    const bashFileWritePattern = /```(?:bash|sh|shell)?\s*\n(cat\s+>|echo\s+[^|>].*>|tee\s+|>)\s+([^\n]+)\n([\s\S]*?)```/gi;
+    
+    let match;
+    while ((match = bashFileWritePattern.exec(text)) !== null) {
+        const command = match[1].trim();
+        const filePath = match[2].trim();
+        const content = match[3];
+        
+        // Deteksi apakah ini benar-benar menulis file
+        if (filePath && (content || command.startsWith('cat') || command.startsWith('echo'))) {
+            // Parse argument content
+            let parsedArgs;
+            try {
+                // Coba parse sebagai JSON jika content adalah JSON
+                parsedArgs = JSON.parse(content);
+            } catch {
+                // Jika bukan JSON, kirim sebagai string di parameter 'content'
+                parsedArgs = { content: content };
+            }
+            
+            // Jika ada path file, tambahkan ke arguments
+            if (filePath) {
+                parsedArgs.path = filePath;
+            }
+            
+            toolCalls.push({
+                id: `auto_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                type: 'function',
+                function: {
+                    name: 'write_file',
+                    arguments: JSON.stringify(parsedArgs)
+                }
+            });
+        }
+    }
+    
+    // Pattern untuk mendeteksi perintah terminal (mkdir, rm, touch, dll)
+    const terminalCmdPattern = /```(?:bash|sh|shell)?\s*\n(mkdir|rmdir|rm|touch|chmod|chown|cp|mv)\s+([^\n]+)\n```/gi;
+    
+    while ((match = terminalCmdPattern.exec(text)) !== null) {
+        const cmd = match[1].trim();
+        const args = match[2].trim();
+        
+        toolCalls.push({
+            id: `auto_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            type: 'function',
+            function: {
+                name: 'terminal',
+                arguments: JSON.stringify({ command: `${cmd} ${args}` })
+            }
+        });
+    }
+    
+    // Pattern untuk mendeteksi HTML yang ditulis langsung (bukan sebagai response, tapi sebagai file creation)
+    // Ini sangat sering terjadi di akun baru — model menulis <!DOCTYPE html> langsung di chat
+    const htmlFilePattern = /<!DOCTYPE\s+html>[\s\S]*?<\/html>/gi;
+    
+    if (htmlFilePattern.test(text)) {
+        // Cari semua dokumen HTML dalam teks
+        const htmlMatches = text.match(/<!DOCTYPE\s+html>[\s\S]*?<\/html>/gi);
+        if (htmlMatches) {
+            for (const htmlContent of htmlMatches) {
+                // Coba deteksi nama file dari konteks sekitarnya
+                const fileNameMatch = text.match(/(?:index|main|app|page|home)\.html/i);
+                const fileName = fileNameMatch ? fileNameMatch[0] : 'index.html';
+                
+                toolCalls.push({
+                    id: `auto_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    type: 'function',
+                    function: {
+                        name: 'write_file',
+                        arguments: JSON.stringify({ path: fileName, content: htmlContent })
+                    }
+                });
+            }
+        }
+    }
+    
+    return toolCalls.length > 0 ? toolCalls : null;
+}
+
 const log = createLogger('V1');
 const router = express.Router();
 
@@ -142,6 +242,7 @@ async function handleStreamRequest({ req, res, account, prompt, model, completio
     let toolCallBuffer = '';
     let toolCallMode = false;
     let toolCallsSent = false;
+    let currentAccount = account;
 
     const streamDelta = (type, content) => {
         if (aborted) return;
@@ -199,32 +300,52 @@ async function handleStreamRequest({ req, res, account, prompt, model, completio
         }
     };
 
-    try {
-        await runChat({ account, prompt, model, hasTools, onDelta: streamDelta });
-    } catch (firstError) {
-        if (isTokenExpiredError(firstError)) {
-            log.warn(`Token expired untuk ${account.email}, retry...`);
-            try {
-                const refreshed = await relogin(account, 'RETRY');
-                if (!refreshed) throw new Error('Login ulang gagal setelah token expired.');
-                await runChat({ account: refreshed, prompt, model, hasTools, onDelta: streamDelta });
-            } catch (retryError) {
-                log.error(`Retry gagal (${account.email}): ${retryError.message}`);
-                if (!aborted) {
-                    writeSseChunk(res, {
-                        error: { message: retryError.message, type: 'upstream_error' }
-                    });
+    async function executeStream(attempt = 1) {
+        try {
+            await runChat({ account: currentAccount, prompt, model, hasTools, onDelta: streamDelta });
+        } catch (firstError) {
+            if (isTokenExpiredError(firstError)) {
+                log.warn(`Token expired untuk ${currentAccount.email}, retry...`);
+                try {
+                    const refreshed = await relogin(currentAccount, 'RETRY');
+                    if (!refreshed) throw new Error('Login ulang gagal setelah token expired.');
+                    await runChat({ account: refreshed, prompt, model, hasTools, onDelta: streamDelta });
+                } catch (retryError) {
+                    log.error(`Retry gagal (${currentAccount.email}): ${retryError.message}`);
+                    await handleFailover(retryError, attempt);
                 }
-            }
-        } else {
-            log.error(`Chat gagal (${account.email}): ${firstError.message}`);
-            if (!aborted) {
-                writeSseChunk(res, {
-                    error: { message: firstError.message, type: 'upstream_error' }
-                });
+            } else {
+                log.error(`Chat gagal (${currentAccount.email}): ${firstError.message}`);
+                await handleFailover(firstError, attempt);
             }
         }
     }
+
+    async function handleFailover(error, attempt) {
+        if (aborted) return;
+        const parsedCreds = req.headers ? (req.headers.authorization || req.headers['x-api-key']) : null;
+        const isRoundRobin = !parsedCreds || !parsedCreds.includes(':');
+
+        if (isRoundRobin && attempt < 3) {
+            log.warn(`[Failover] Beralih ke akun berikutnya, percobaan #${attempt + 1}...`);
+            const nextAccount = await getAccountForRequest(req);
+            if (nextAccount && nextAccount.email !== currentAccount.email) {
+                currentAccount = nextAccount;
+                toolCallBuffer = '';
+                toolCallMode = false;
+                toolCallsSent = false;
+                await executeStream(attempt + 1);
+                return;
+            }
+        }
+        if (!aborted) {
+            writeSseChunk(res, {
+                error: { message: error.message, type: 'upstream_error' }
+            });
+        }
+    }
+
+    await executeStream();
 
     if (aborted) return;
     
@@ -236,13 +357,33 @@ async function handleStreamRequest({ req, res, account, prompt, model, completio
                 emitToolCallChunks(res, completionId, model, toolCalls);
                 toolCallsSent = true;
             } else {
-                // Ternyata bukan tool call valid (bocor/salah tag/teks biasa).
-                // Kirimkan seluruh teks yang sempat ditahan ke client agar tidak hilang!
-                const beforeToolCall = toolCallBuffer.split(/<tool_calls>|<\|DSML\|tool_calls>/)[0];
-                const heldText = toolCallBuffer.substring(beforeToolCall.length);
-                writeSseChunk(res, buildChatChunk({ id: completionId, model, delta: { content: heldText } }));
-                log.warn("Tool call mode active but no valid tool calls parsed. Restored held text.");
+                // Coba deteksi markdown tool leaks (bash/html yang bocor)
+                const markdownToolCalls = detectAndConvertMarkdownToolLeaks(toolCallBuffer);
+                if (markdownToolCalls && markdownToolCalls.length > 0) {
+                    log.info(`Auto-converted ${markdownToolCalls.length} markdown code block(s) to tool_calls`);
+                    emitToolCallChunks(res, completionId, model, markdownToolCalls);
+                    toolCallsSent = true;
+                } else {
+                    // Ternyata bukan tool call valid (bocor/salah tag/teks biasa).
+                    // Kirimkan seluruh teks yang sempat ditahan ke client agar tidak hilang!
+                    const beforeToolCall = toolCallBuffer.split(/<tool_calls>|<\|DSML\|tool_calls>/)[0];
+                    const heldText = toolCallBuffer.substring(beforeToolCall.length);
+                    writeSseChunk(res, buildChatChunk({ id: completionId, model, delta: { content: heldText } }));
+                    log.warn("Tool call mode active but no valid tool calls parsed. Restored held text.");
+                }
             }
+        }
+    }
+    
+    // FALLBACK: Jika TIDAK dalam toolCallMode tapi buffer mengandung markdown tool leaks
+    // Ini menangani kasus di mana model TIDAK pernah menulis <tool_calls> sama sekali
+    // tapi langsung menulis ```bash\ncat > file...``` atau HTML mentah di chat.
+    if (hasTools && !toolCallMode && !toolCallsSent && toolCallBuffer) {
+        const markdownToolCalls = detectAndConvertMarkdownToolLeaks(toolCallBuffer);
+        if (markdownToolCalls && markdownToolCalls.length > 0) {
+            log.info(`[Fallback] Auto-converted ${markdownToolCalls.length} markdown leak(s) to tool_calls`);
+            emitToolCallChunks(res, completionId, model, markdownToolCalls);
+            toolCallsSent = true;
         }
     }
     
@@ -252,7 +393,7 @@ async function handleStreamRequest({ req, res, account, prompt, model, completio
         buildChatChunk({ id: completionId, model, delta: {}, finishReason })
     );
     writeSseDone(res);
-    log.info(`Stream selesai via ${account.email}${toolCallsSent ? ' (with tool_calls)' : ''}`);
+    log.info(`Stream selesai via ${currentAccount.email}${toolCallsSent ? ' (with tool_calls)' : ''}`);
 }
 
 /**

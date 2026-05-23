@@ -1,0 +1,8 @@
+# Daftar akun DeepSeek
+# Format: email:password
+# Satu baris per akun
+# Baris diawali # otomatis diabaikan
+
+email1@example.com:password123
+email2@example.com:password456
+# cadangan@example.com:passwordCadangan

@@ -1,0 +1,27 @@
+{
+  "name": "deepseek-api-proxy",
+  "version": "1.1.0",
+  "description": "DeepSeek Multi-Account Proxy — OpenAI-compatible, 9router-ready, vibe-coding ready",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test src/**/*.test.js"
+  },
+  "keywords": [
+    "deepseek",
+    "ai",
+    "openai-proxy",
+    "api"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.13.6",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.1",
+    "express": "^5.2.1",
+    "form-data": "^4.0.5"
+  }
+}

@@ -142,6 +142,7 @@ async function handleStreamRequest({ req, res, account, prompt, model, completio
     let toolCallBuffer = '';
     let toolCallMode = false;
     let toolCallsSent = false;
+    let currentAccount = account;
 
     const streamDelta = (type, content) => {
         if (aborted) return;
@@ -199,32 +200,52 @@ async function handleStreamRequest({ req, res, account, prompt, model, completio
         }
     };
 
-    try {
-        await runChat({ account, prompt, model, hasTools, onDelta: streamDelta });
-    } catch (firstError) {
-        if (isTokenExpiredError(firstError)) {
-            log.warn(`Token expired untuk ${account.email}, retry...`);
-            try {
-                const refreshed = await relogin(account, 'RETRY');
-                if (!refreshed) throw new Error('Login ulang gagal setelah token expired.');
-                await runChat({ account: refreshed, prompt, model, hasTools, onDelta: streamDelta });
-            } catch (retryError) {
-                log.error(`Retry gagal (${account.email}): ${retryError.message}`);
-                if (!aborted) {
-                    writeSseChunk(res, {
-                        error: { message: retryError.message, type: 'upstream_error' }
-                    });
+    async function executeStream(attempt = 1) {
+        try {
+            await runChat({ account: currentAccount, prompt, model, hasTools, onDelta: streamDelta });
+        } catch (firstError) {
+            if (isTokenExpiredError(firstError)) {
+                log.warn(`Token expired untuk ${currentAccount.email}, retry...`);
+                try {
+                    const refreshed = await relogin(currentAccount, 'RETRY');
+                    if (!refreshed) throw new Error('Login ulang gagal setelah token expired.');
+                    await runChat({ account: refreshed, prompt, model, hasTools, onDelta: streamDelta });
+                } catch (retryError) {
+                    log.error(`Retry gagal (${currentAccount.email}): ${retryError.message}`);
+                    await handleFailover(retryError, attempt);
                 }
-            }
-        } else {
-            log.error(`Chat gagal (${account.email}): ${firstError.message}`);
-            if (!aborted) {
-                writeSseChunk(res, {
-                    error: { message: firstError.message, type: 'upstream_error' }
-                });
+            } else {
+                log.error(`Chat gagal (${currentAccount.email}): ${firstError.message}`);
+                await handleFailover(firstError, attempt);
             }
         }
     }
+
+    async function handleFailover(error, attempt) {
+        if (aborted) return;
+        const parsedCreds = req.headers ? (req.headers.authorization || req.headers['x-api-key']) : null;
+        const isRoundRobin = !parsedCreds || !parsedCreds.includes(':');
+
+        if (isRoundRobin && attempt < 3) {
+            log.warn(`[Failover] Beralih ke akun berikutnya, percobaan #${attempt + 1}...`);
+            const nextAccount = await getAccountForRequest(req);
+            if (nextAccount && nextAccount.email !== currentAccount.email) {
+                currentAccount = nextAccount;
+                toolCallBuffer = '';
+                toolCallMode = false;
+                toolCallsSent = false;
+                await executeStream(attempt + 1);
+                return;
+            }
+        }
+        if (!aborted) {
+            writeSseChunk(res, {
+                error: { message: error.message, type: 'upstream_error' }
+            });
+        }
+    }
+
+    await executeStream();
 
     if (aborted) return;
     
@@ -252,7 +273,7 @@ async function handleStreamRequest({ req, res, account, prompt, model, completio
         buildChatChunk({ id: completionId, model, delta: {}, finishReason })
     );
     writeSseDone(res);
-    log.info(`Stream selesai via ${account.email}${toolCallsSent ? ' (with tool_calls)' : ''}`);
+    log.info(`Stream selesai via ${currentAccount.email}${toolCallsSent ? ' (with tool_calls)' : ''}`);
 }
 
 /**

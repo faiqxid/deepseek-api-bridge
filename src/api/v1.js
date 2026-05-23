@@ -228,12 +228,21 @@ async function handleStreamRequest({ req, res, account, prompt, model, completio
 
     if (aborted) return;
     
-    // Jika ada tool calls yang belum terkirim (buffer belum selesai), parse sekarang
-    if (hasTools && toolCallMode && !toolCallsSent) {
-        const toolCalls = parseToolCallsFromText(toolCallBuffer);
-        if (toolCalls && toolCalls.length > 0) {
-            emitToolCallChunks(res, completionId, model, toolCalls);
-            toolCallsSent = true;
+    // Pemulihan jika terdeteksi toolCallMode tapi ternyata bukan tool call valid
+    if (hasTools && toolCallMode) {
+        if (!toolCallsSent) {
+            const toolCalls = parseToolCallsFromText(toolCallBuffer);
+            if (toolCalls && toolCalls.length > 0) {
+                emitToolCallChunks(res, completionId, model, toolCalls);
+                toolCallsSent = true;
+            } else {
+                // Ternyata bukan tool call valid (bocor/salah tag/teks biasa).
+                // Kirimkan seluruh teks yang sempat ditahan ke client agar tidak hilang!
+                const beforeToolCall = toolCallBuffer.split(/<tool_calls>|<\|DSML\|tool_calls>/)[0];
+                const heldText = toolCallBuffer.substring(beforeToolCall.length);
+                writeSseChunk(res, buildChatChunk({ id: completionId, model, delta: { content: heldText } }));
+                log.warn("Tool call mode active but no valid tool calls parsed. Restored held text.");
+            }
         }
     }
     

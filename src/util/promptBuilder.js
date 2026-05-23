@@ -75,10 +75,10 @@ export function buildCombinedPrompt(messages = [], tools = null) {
         } else if (msg.role === 'user') {
             if (text) {
                 // Jika ini adalah pesan user terakhir dan kita punya tools,
-                // tambahkan suffix penegasan super ketat agar model WAJIB memakai tool call
-                // dan tidak menuliskan kode mentah di markdown biasa.
+                // tambahkan suffix penegasan SUPER AGRESIF agar model WAJIB memakai tool call.
+                // Ini sangat penting untuk akun baru (fresh session) yang tidak punya few-shot history.
                 if (hasTools && i === lastUserIndex) {
-                    text += "\n\n[SYSTEM NOTE: You MUST use the `<tool_calls>` XML format to execute functions if you need to read, write, or modify files or run terminal commands. DO NOT output the file content or code block directly in markdown. You must call the appropriate tool (e.g. `write_file` or `patch`) to apply the changes to the disk! Check available tools above.]";
+                    text += "\n\n[SYSTEM NOTE: You MUST use the `<tool_calls>` XML format to execute functions if you need to read, write, modify files, or run terminal commands. DO NOT output the file content or code block directly in markdown. DO NOT write bash/shell commands in markdown. You MUST call the appropriate tool (e.g. write_file, patch, or terminal) to apply changes to the disk! This is your FINAL and ONLY chance to execute actions. If you fail to use tools, the user will not be able to complete their task. Check available tools above.]";
                 }
                 turns.push(`User: ${text}`);
             }
